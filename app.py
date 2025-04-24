@@ -402,7 +402,7 @@ def validate_clipping(file_display_data: dict) -> tuple[dict, list[str]]:
                 audio = AudioSegment.from_file(str(f_path))
                 samples = get_normalized_samples(audio)
                 if samples is not None and np.max(np.abs(samples)) >= CLIP_THRESHOLD:
-                    messages.append(f"📎 Clipping detected in '{file_data['display_name']}')") # Changed icon
+                    messages.append(f"📎 Clipping detected in '{file_data['display_name']}'") # Changed icon
                     add_issue(file_data, 'audio_clipping')
                     has_clipping = True
             except Exception as e:
