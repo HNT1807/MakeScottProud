@@ -2,105 +2,72 @@ import streamlit as st
 import os
 import re
 from pathlib import Path
-import tempfile # To save uploaded files temporarily
-import shutil # To remove temp directory
-import natsort # For natural sorting
-import time # For progress simulation
-from PIL import Image # For artwork check
-from pydub import AudioSegment # For audio spec check
-from pydub.utils import mediainfo # For audio spec check
-import numpy as np # For audio sample manipulation
-from collections import defaultdict # For grouping samples
-from spellchecker import SpellChecker # For spelling check
-import pyperclip # For copy to clipboard
-import soundfile as sf # For LUFS calculation audio loading
-import pyloudnorm as pyln # For LUFS calculation
-import pandas as pd # For displaying the table
+import natsort
+import time
+import numpy as np
+from PIL import Image
+from pydub import AudioSegment
+from pydub.utils import mediainfo
+from collections import defaultdict
+from spellchecker import SpellChecker
+import pyperclip
+import soundfile as sf
+import pyloudnorm as pyln
+import pandas as pd
+import shutil
+import tempfile
 
 # --- Constants ---
 VALID_SUBFOLDERS = {"Loops", "One Shots"}
+VALID_EXTENSIONS = {".wav", ".jpg", ".jpeg"}
 DEMO_SUFFIX = "_Demo.wav"
 ARTWORK_SUFFIX = "_Artwork"
-VALID_ARTWORK_EXT = {".jpg", ".jpeg"} # Allow .jpeg as well, common alias for jpg
-TARGET_ARTWORK_EXT = ".jpg" # Explicitly target jpg
+VALID_ARTWORK_EXT = {".jpg", ".jpeg"}
+TARGET_ARTWORK_EXT = ".jpg"
 MAX_ARTWORK_SIZE_MB = 4
 MIN_ARTWORK_DIM = 1000
-# Only allow WAV files for processing and spec checks
 VALID_AUDIO_EXT = {".wav"}
 TARGET_SAMPLE_RATE = 44100
 TARGET_BIT_DEPTH = 24
 TARGET_CHANNELS = 2
-SILENCE_THRESHOLD_DBFS = -60.0 # Threshold for silence detection (in dBFS)
-ZERO_CROSSING_THRESHOLD = 0.001 # Amplitude threshold for zero crossing
-BAR_LENGTH_TOLERANCE = 0.001 # Tolerance for whole bar length check (as percentage of a bar)
+SILENCE_THRESHOLD_DBFS = -60.0
+ZERO_CROSSING_THRESHOLD = 0.001
+BAR_LENGTH_TOLERANCE = 0.001
 BPM_REGEX = re.compile(r"_(\d+)bpm")
-# Regex for sequence number: _<digits>_ OR _<digits>.<extension>
 SEQUENCE_REGEX = re.compile(r"_(\d+)_|_(\d+)\.(?=[^.]*$)")
-# Regex for key: _key<key_notation>
-KEY_REGEX = re.compile(r"_key([A-Ga-g][#b♭]?[mM]?)") # More robust key regex
-# Musical key order (using numeric values for sorting)
-# Minor keys get a fractional part for sorting after major
+KEY_REGEX = re.compile(r"_key([A-Ga-g][#b♭]?[mM]?)")
 KEY_ORDER = {
-    "C": 0, "Cm": 0.1,
-    "C#": 1, "Db": 1, "C#m": 1.1, "Dbm": 1.1,
-    "D": 2, "Dm": 2.1,
-    "D#": 3, "Eb": 3, "D#m": 3.1, "Ebm": 3.1,
-    "E": 4, "Em": 4.1,
-    "F": 5, "Fm": 5.1,
-    "F#": 6, "Gb": 6, "F#m": 6.1, "Gbm": 6.1,
-    "G": 7, "Gm": 7.1,
-    "G#": 8, "Ab": 8, "G#m": 8.1, "Abm": 8.1,
-    "A": 9, "Am": 9.1,
-    "A#": 10, "Bb": 10, "A#m": 10.1, "Bbm": 10.1,
+    "C": 0, "Cm": 0.1, "C#": 1, "Db": 1, "C#m": 1.1, "Dbm": 1.1,
+    "D": 2, "Dm": 2.1, "D#": 3, "Eb": 3, "D#m": 3.1, "Ebm": 3.1,
+    "E": 4, "Em": 4.1, "F": 5, "Fm": 5.1, "F#": 6, "Gb": 6, "F#m": 6.1, "Gbm": 6.1,
+    "G": 7, "Gm": 7.1, "G#": 8, "Ab": 8, "G#m": 8.1, "Abm": 8.1,
+    "A": 9, "Am": 9.1, "A#": 10, "Bb": 10, "A#m": 10.1, "Bbm": 10.1,
     "B": 11, "Bm": 11.1
 }
-# Spelling Constants
-SPELLCHECK_IGNORE_WORDS = {"Metastarter", "Cymatics", "Ableton", "Synth", "Serum", "Vital", "Phaseplant"} # Add common technical/brand terms
-# Regex to find parts to REMOVE before splitting into words for spellcheck
+SPELLCHECK_IGNORE_WORDS = {"Metastarter", "Cymatics", "Ableton", "Synth", "Serum", "Vital", "Phaseplant"}
 SPELLCHECK_REMOVE_PATTERNS = re.compile(r"_key[A-Ga-g][#b♭]?[mM]?|_\d+bpm|_\d+_|_\d+$|_+Demo$|_Artwork$", re.IGNORECASE)
-# Regex to split remaining text into words (CamelCase, underscore/space separated)
 SPELLCHECK_SPLIT_WORDS_PATTERN = re.compile(r"[A-Z]?[a-z]+|[A-Z]+(?=[A-Z][a-z]|$)|\d+")
 
 # --- Configuration ---
 st.set_page_config(layout="wide", page_title="Make Scott Proud!")
 
 # --- State Management ---
-if 'dropped_items' not in st.session_state:
-    st.session_state.dropped_items = None # Store UploadedFile objects
+# State for text input approach
+if 'folder_path' not in st.session_state:
+    st.session_state.folder_path = ""
 if 'messages' not in st.session_state:
     st.session_state.messages = []
 if 'file_display_data' not in st.session_state:
-    # Structure: {subfolder_path: Path, files: [{path: Path, display_name: str, issues: list, ...}]}
     st.session_state.file_display_data = {}
 if 'processing_complete' not in st.session_state:
     st.session_state.processing_complete = False
-if 'reset_app' not in st.session_state:
-    st.session_state.reset_app = False
 if 'loudness_results' not in st.session_state:
-    st.session_state.loudness_results = [] # Store dicts: {filename: str, lufs: float | str}
+    st.session_state.loudness_results = []
 
 # --- Helper Functions ---
-
 def natural_sort_key(path):
     """Provides a key for natural sorting of Path objects."""
     return natsort.natsort_keygen()(path.name)
-
-def get_files_from_item(item_path: Path) -> list[Path]:
-    """Recursively get all files from a path (file or directory)."""
-    all_files = []
-    if item_path.is_file():
-        # If a single file is dropped, its 'parent' for grouping will be its actual parent
-        all_files.append(item_path)
-    elif item_path.is_dir():
-        # If a directory is dropped, we treat IT as the 'subfolder' key later
-        # But we still need all files inside it recursively
-        for root, _, files in os.walk(item_path):
-            for file in files:
-                file_path = Path(root) / file
-                # Simple check to ignore hidden files (like .DS_Store)
-                if not file.startswith('.'):
-                    all_files.append(file_path)
-    return all_files
 
 def add_issue(file_data, issue_type):
     """Adds an issue type to a file's data if not already present."""
@@ -127,44 +94,36 @@ def get_sorted_messages(messages: list[str]) -> list[str]:
     return success_msgs + warning_msgs + error_msgs
 
 # --- QC Check Functions ---
-
-def validate_folder_names(subfolder_paths_keys: list[Path]) -> list[str]:
-    """Checks if only valid top-level folders ('Loops', 'One Shots') are present."""
+# Define validate_folder_names to work with actual subdirs
+def validate_folder_names(file_display_data: dict) -> list[str]:
+    """Checks if required subfolders ('Loops', 'One Shots') are present 
+       among the found subfolders and flags missing/extra ones."""
     messages = []
-    invalid_folders = []
-    valid_found = False
+    required_missing = []
+    invalid_found = []
+    
+    # Get the names of the subfolders actually found and processed
+    # Exclude the special key for root files
+    found_subfolder_names = {key for key in file_display_data if key != "_root_files_"}
 
-    # Allow a potential root folder placeholder if needed, add to valid set temporarily
-    allowed_folders = VALID_SUBFOLDERS.union({Path("_root_files_")}) # Add _root_files_ temporarily
+    # Check for missing required folders
+    for req_folder in VALID_SUBFOLDERS:
+        if req_folder not in found_subfolder_names:
+            required_missing.append(req_folder)
 
-    for sf_path in subfolder_paths_keys:
-        folder_name = sf_path.name # Get the string name from Path object
-        if folder_name in VALID_SUBFOLDERS:
-            valid_found = True
-        elif folder_name == "_root_files_":
-             messages.append(f"❔ Files found directly in root (not in 'Loops' or 'One Shots').")
-             # Decide if root files are an error or just a warning
-             # add_issue(..., 'folder_root_files') # Optional: Add specific issue marker
-        elif folder_name == "_error_parsing_name_":
-             messages.append(f"❌ Error determining folder structure for some files.")
-             invalid_folders.append(folder_name) # Treat as invalid
-        else:
-            # Folder is not Loops, One Shots, or _root_files_
-            invalid_folders.append(folder_name)
+    # Check for unexpected folders found among the processed ones
+    for found_folder in found_subfolder_names:
+         if found_folder not in VALID_SUBFOLDERS:
+             invalid_found.append(found_folder)
 
-    if not invalid_folders and valid_found:
-        messages.append("✅ Folder structure OK (Loops/One Shots)")
-    elif not invalid_folders and not valid_found:
-         # Only root files or parsing errors found
-         pass # Specific messages already added
+    if not required_missing and not invalid_found:
+        messages.append(f"✅ Required folders found ('{ '/'.join(VALID_SUBFOLDERS) }')")
     else:
-        messages.append(f"❌ Invalid top-level folders found: {invalid_folders}. Only 'Loops' and 'One Shots' allowed.")
-
-    # Check if BOTH Loops and One Shots are present (optional stricter check)
-    # found_loops = any(p.name == "Loops" for p in subfolder_paths_keys)
-    # found_one_shots = any(p.name == "One Shots" for p in subfolder_paths_keys)
-    # if valid_found and not (found_loops and found_one_shots):
-    #      messages.append(f"❔ Missing one of 'Loops' or 'One Shots' folders.")
+        if required_missing:
+             messages.append(f"❌ Missing required folders: {required_missing}")
+        if invalid_found:
+             # Report the extra folders found
+             messages.append(f"❌ Unexpected subfolders found: {invalid_found}. Only '{ '/'.join(VALID_SUBFOLDERS) }' expected.")
 
     return messages
 
@@ -222,15 +181,15 @@ def validate_demo_file(file_display_data: dict) -> tuple[dict, list[str]]:
         potential_demos = []
         for sf_key, files in updated_file_data.items():
             for file_data in files:
-                 if " - " in file_data['display_name']:
-                      potential_demos.append(file_data)
+                if " - " in file_data['display_name']:
+                    potential_demos.append(file_data)
 
         if potential_demos:
-             messages.append(f"❌ Missing Demo file (None ending in '{DEMO_SUFFIX}', but found files with ' - ')")
-             for file_data in potential_demos:
-                  add_issue(file_data, 'demo_missing_suffix')
+            messages.append(f"❌ Missing Demo file (None ending in '{DEMO_SUFFIX}', but found files with ' - ')")
+            for file_data in potential_demos:
+                add_issue(file_data, 'demo_missing_suffix')
         else:
-             messages.append(f"❌ Missing Demo file (None ending in '{DEMO_SUFFIX}')")
+            messages.append(f"❌ Missing Demo file (None ending in '{DEMO_SUFFIX}')")
 
     return updated_file_data, messages
 
@@ -275,8 +234,8 @@ def validate_artwork(file_display_data: dict) -> tuple[dict, list[str]]:
                 # Check dimensions and squareness
                 with Image.open(f_path) as img:
                     if img.format not in ["JPEG"]:
-                         issues.append(f"format is '{img.format}', not JPEG")
-                         add_issue(file_data, 'artwork_format')
+                        issues.append(f"format is '{img.format}', not JPEG")
+                        add_issue(file_data, 'artwork_format')
 
                     width, height = img.size
                     if width < MIN_ARTWORK_DIM or height < MIN_ARTWORK_DIM:
@@ -301,9 +260,9 @@ def validate_artwork(file_display_data: dict) -> tuple[dict, list[str]]:
                 add_issue(file_data, 'artwork_ok') # Add positive marker if needed
                 break # Stop checking this subfolder's files
             else:
-                 # File was correctly named but failed spec checks
-                 # Issue already added, maybe add a specific message for this file?
-                 messages.append(f"❌ Artwork Specs: '{filename}' failed checks: {', '.join(issues)}")
+                # File was correctly named but failed spec checks
+                # Issue already added, maybe add a specific message for this file?
+                messages.append(f"❌ Artwork Specs: '{filename}' failed checks: {', '.join(issues)}")
 
     # --- Final Message --- #
     if found_valid_artwork:
@@ -373,7 +332,7 @@ def validate_audio_specs(file_display_data: dict) -> tuple[dict, list[str]]:
                 has_any_spec_issue = True
             except Exception as e:
                 if "ffmpeg" in str(e).lower() or "ffprobe" in str(e).lower():
-                     issues.append(f"error reading audio (possible missing FFmpeg/libsndfile or corrupted file): {e}")
+                    issues.append(f"error reading audio (possible missing FFmpeg/libsndfile or corrupted file): {e}")
                 else:
                     issues.append(f"error reading audio: {e}")
                 add_issue(file_data, 'audio_error')
@@ -478,7 +437,7 @@ def validate_zero_crossings(file_display_data: dict) -> tuple[dict, list[str]]:
 
                 # Check end samples (last sample of each channel)
                 for i in range(channels):
-                     if abs(samples[-channels + i]) > ZERO_CROSSING_THRESHOLD:
+                    if abs(samples[-channels + i]) > ZERO_CROSSING_THRESHOLD:
                         end_ok = False
                         break
 
@@ -546,7 +505,7 @@ def validate_sample_lengths(file_display_data: dict) -> tuple[dict, list[str]]:
     if not has_length_issue and checked_files > 0:
         messages.append("✅ Sample lengths match whole bars")
     elif checked_files == 0:
-         messages.append("❔ No files with BPM found to check bar lengths.")
+        messages.append("❔ No files with BPM found to check bar lengths.")
 
     return updated_file_data, messages
 
@@ -587,9 +546,9 @@ def parse_sample_filename(filename: str, file_path: Path, index_in_group: int) -
         group_name_end_index = min(indices)
         # Ensure we don't cut off at a leading underscore if it's the only thing before attrib
         if group_name_end_index > 0 and base_name[group_name_end_index-1] == '_':
-             group_name = base_name[:group_name_end_index-1] # Exclude trailing underscore before attr
+            group_name = base_name[:group_name_end_index-1] # Exclude trailing underscore before attr
         else:
-             group_name = base_name[:group_name_end_index]
+            group_name = base_name[:group_name_end_index]
     else:
         group_name = base_name # No attributes found, group is the whole base name
 
@@ -630,10 +589,10 @@ def validate_sample_order(file_display_data: dict) -> tuple[dict, list[str]]:
             f_path = file_data['path']
             # Only parse WAV files, exclude demos
             if f_path.suffix.lower() == ".wav" and DEMO_SUFFIX.lower() not in f_path.name.lower():
-                 parsed_info = parse_sample_filename(f_path.name, f_path, idx)
-                 # Associate parsed info back to the original file_data dictionary
-                 file_data['parsed_info'] = parsed_info
-                 sample_infos.append(file_data)
+                parsed_info = parse_sample_filename(f_path.name, f_path, idx)
+                # Associate parsed info back to the original file_data dictionary
+                file_data['parsed_info'] = parsed_info
+                sample_infos.append(file_data)
 
     if not sample_infos:
         messages.append("❔ No WAV files found to check sample order.")
@@ -696,8 +655,8 @@ def validate_sample_order(file_display_data: dict) -> tuple[dict, list[str]]:
         try:
             expected_sorted_list = sorted(group_file_list, key=get_sort_key)
         except TypeError as e:
-             messages.append(f"⚠️ Error sorting group '{group_name_display}' ({attribute_type_display}): {e}")
-             continue # Skip comparison for this group
+            messages.append(f"⚠️ Error sorting group '{group_name_display}' ({attribute_type_display}): {e}")
+            continue # Skip comparison for this group
 
         # Get the current order based on original file positions within the folder
         # The `files_in_folder` list used to build `sample_infos` is already sorted naturally
@@ -748,9 +707,9 @@ def extract_words_for_spellcheck(filename: str) -> list[str]:
         if part_lower.startswith('key') and KEY_REGEX.match(f"_{part}"):
             continue
         if part_lower.endswith('bpm') and part_lower[:-3].isdigit() and BPM_REGEX.match(f"_{part}"):
-             continue
+            continue
         if part_lower == "demo" or part_lower == "artwork":
-             continue
+            continue
 
         # 5. For remaining parts, split by CamelCase etc. and add to list
         potential_words_in_part = SPELLCHECK_SPLIT_WORDS_PATTERN.findall(part)
@@ -795,7 +754,7 @@ def validate_spelling(file_display_data: dict) -> tuple[dict, list[str]]:
     if not has_spelling_issue and checked_files_count > 0:
         messages.append("✅ Spelling seems OK")
     elif checked_files_count == 0:
-         messages.append("❔ No files checked for spelling.")
+        messages.append("❔ No files checked for spelling.")
 
     return updated_file_data, messages
 
@@ -811,16 +770,16 @@ def calculate_integrated_loudness(file_path: Path) -> float | None:
             elif data.dtype == np.int32:
                 max_val = np.iinfo(np.int32).max
             elif data.dtype == np.uint8:
-                 # pydub loads uint8 as centered around 128
+                 # Correct uint8 handling
                  data = data.astype(np.float32) - 128.0
                  max_val = 128.0
-            else:
-                 # Assume float64 or other float, normalize directly
-                 max_val = np.max(np.abs(data))
-                 if max_val == 0: return -np.inf # Silence
-
-            if data.dtype != np.uint8: # Avoid re-normalizing uint8
+            # Check if max_val was determined (i.e., it was int or uint8)
+            if 'max_val' in locals() and data.dtype != np.uint8: # Avoid re-normalizing uint8
                  data = data.astype(np.float32) / max_val
+            elif 'max_val' not in locals(): # Handle other float types
+                max_val = np.max(np.abs(data))
+                if max_val == 0: return -np.inf # Silence
+                data = data.astype(np.float32) / max_val
 
         meter = pyln.Meter(rate) # create BS.1770 meter
         loudness = meter.integrated_loudness(data) # measure loudness
@@ -833,6 +792,109 @@ def calculate_integrated_loudness(file_path: Path) -> float | None:
         print(f"Error calculating LUFS for {file_path.name}: {e}")
         return None # Indicate error
 
+# --- New function to process folder path ---
+def process_folder_path(folder_path_str: str):
+    """Processes files directly from a given folder path, handling subdirs dynamically."""
+    st.session_state.messages = []
+    st.session_state.file_display_data = {}
+    st.session_state.processing_complete = False
+    st.session_state.loudness_results = []
+
+    root_path = Path(folder_path_str)
+
+    with st.spinner(f'Processing folder: {folder_path_str}...'):
+        # Validate root path
+        if not root_path.exists():
+            st.error(f"Error: Folder path does not exist: {root_path}")
+            st.session_state.messages = [f"❌ Error: Folder path does not exist: {root_path}"]
+            st.session_state.processing_complete = True
+            st.rerun()
+            return # Stop processing
+        if not root_path.is_dir():
+            st.error(f"Error: Provided path is not a folder: {root_path}")
+            st.session_state.messages = [f"❌ Error: Provided path is not a folder: {root_path}"]
+            st.session_state.processing_complete = True
+            st.rerun()
+            return # Stop processing
+
+        processed_data = defaultdict(list)
+        root_files_list = []
+        try:
+            # --- Dynamic iteration over root path contents --- #
+            for item in root_path.iterdir():
+                # Ignore hidden files/folders
+                if item.name.startswith('.'):
+                    continue
+
+                # Process Subdirectories
+                if item.is_dir():
+                    subfolder_path = item
+                    files_in_subfolder = []
+                    for sub_item in subfolder_path.iterdir():
+                        # Only include files with valid extensions
+                        if sub_item.is_file() and sub_item.suffix.lower() in VALID_EXTENSIONS:
+                            files_in_subfolder.append(sub_item)
+
+                    if files_in_subfolder:
+                         # Sort naturally
+                         sorted_files = sorted(files_in_subfolder, key=natural_sort_key)
+                         # Store in the desired format using the actual subfolder name
+                         processed_data[subfolder_path.name] = [
+                             {
+                                 "path": file_path,
+                                 "display_name": file_path.name,
+                                 "issues": []
+                             }
+                             for file_path in sorted_files
+                         ]
+
+                # Process Root Files
+                elif item.is_file() and item.suffix.lower() in VALID_EXTENSIONS:
+                     # Check parent ensures it's directly in root_path, not already processed above
+                     if item.parent == root_path:
+                          root_files_list.append(item)
+            # --- End dynamic iteration --- #
+
+            # Add collected root files (if any) after sorting
+            if root_files_list:
+                sorted_root_files = sorted(root_files_list, key=natural_sort_key)
+                processed_data["_root_files_"] = [
+                     {
+                         "path": file_path,
+                         "display_name": file_path.name,
+                         "issues": []
+                     }
+                     for file_path in sorted_root_files
+                ]
+
+        except Exception as e:
+            st.error(f"Error accessing or reading folder structure: {e}")
+            st.session_state.messages.append(f"❌ Error reading folder: {e}")
+            st.session_state.processing_complete = True # Mark as complete even on error
+            st.rerun()
+            return
+
+        # Check if any valid files were found (in root or subdirs)
+        if not processed_data:
+            st.warning(f"No files with valid extensions ({', '.join(VALID_EXTENSIONS)}) found in the specified folder or its direct subdirectories.")
+            st.session_state.messages.append("❔ No processable files found.")
+            st.session_state.file_display_data = {} # Ensure it's empty
+        else:
+            # --- Run QC Checks --- #
+            st.session_state.file_display_data = dict(processed_data) # Convert defaultdict
+            if st.session_state.file_display_data:
+                with st.spinner('Running QC Checks...'):
+                    updated_data, qc_messages, loudness_data = run_all_qc_checks(st.session_state.file_display_data)
+                    st.session_state.file_display_data = updated_data
+                    st.session_state.messages.extend(qc_messages) # Extend existing messages
+                    st.session_state.loudness_results = loudness_data
+            else:
+                 # This case might be redundant due to the outer check, but safe to keep
+                 st.session_state.messages.append("No files could be processed for QC checks.")
+
+    st.session_state.processing_complete = True
+    st.rerun()
+
 # --- Main Orchestration Function ---
 def run_all_qc_checks(file_display_data: dict) -> tuple[dict, list[str], list[dict]]:
     """Runs all QC checks and returns updated data, messages, and loudness results."""
@@ -840,22 +902,20 @@ def run_all_qc_checks(file_display_data: dict) -> tuple[dict, list[str], list[di
     updated_data = file_display_data
     loudness_results = []
 
-    st.write("Running Folder/Name Checks...")
-    # ... (folder, space, demo checks)
-    folder_messages = validate_folder_names(list(updated_data.keys()))
+    st.write("Running Folder Structure Check...")
+    # Validate based on the keys found in file_display_data
+    folder_messages = validate_folder_names(updated_data) # Pass the dictionary
     all_messages.extend(folder_messages)
+
+    st.write("Running Filename/Demo/Artwork Checks...")
     updated_data, space_messages = validate_filename_spaces(updated_data)
     all_messages.extend(space_messages)
     updated_data, demo_messages = validate_demo_file(updated_data)
     all_messages.extend(demo_messages)
-
-    st.write("Running Artwork Checks...")
-    # ... (artwork checks)
     updated_data, artwork_messages = validate_artwork(updated_data)
     all_messages.extend(artwork_messages)
 
     st.write("Running Audio Spec/Analysis Checks...")
-    # ... (audio specs, clipping, silence, zero crossing, length)
     updated_data, audio_spec_messages = validate_audio_specs(updated_data)
     all_messages.extend(audio_spec_messages)
     updated_data, clipping_messages = validate_clipping(updated_data)
@@ -868,31 +928,38 @@ def run_all_qc_checks(file_display_data: dict) -> tuple[dict, list[str], list[di
     all_messages.extend(length_messages)
 
     st.write("Running Sample Order Check...")
-    # 10. Sample Order Check
     updated_data, order_messages = validate_sample_order(updated_data)
     all_messages.extend(order_messages)
 
     st.write("Running Spelling Check...")
-    # 11. Spelling Check
     updated_data, spelling_messages = validate_spelling(updated_data)
     all_messages.extend(spelling_messages)
 
     st.write("Calculating Loudness (LUFS)...")
-    # 12. Loudness Calculation (after other checks)
+    # Loudness calculation
     files_for_loudness = []
-    for subfolder, files in updated_data.items():
+    for subfolder_key, files in updated_data.items():
         for file_data in files:
-             # Only calculate for valid WAV files that didn't cause read errors earlier
+            # Use the temp path for calculation
             if file_data['path'].suffix.lower() == ".wav" and not any(e.startswith('audio_error') for e in file_data['issues']):
                 files_for_loudness.append(file_data['path'])
-
     if files_for_loudness:
-        # Use st.progress for LUFS calculation as it can be slow
         lufs_progress = st.progress(0.0, text="Calculating LUFS...")
         total_files = len(files_for_loudness)
         for i, f_path in enumerate(files_for_loudness):
             lufs_value = calculate_integrated_loudness(f_path)
-            result_entry = {"Filename": f_path.name}
+            # Use original name for reporting
+            original_name = "Unknown" # Find original name corresponding to temp path if needed
+            # This requires linking temp path back to original name or storing it differently
+            # Let's find it back in the main data structure
+            for pk, file_list in updated_data.items():
+                for fd in file_list:
+                    if fd['path'] == f_path:
+                        original_name = fd['display_name']
+                        break
+                if original_name != "Unknown": break
+
+            result_entry = {"Filename": original_name}
             if lufs_value is None:
                 result_entry["Integrated Loudness (LUFS)"] = "Error"
             elif lufs_value == -np.inf:
@@ -900,205 +967,106 @@ def run_all_qc_checks(file_display_data: dict) -> tuple[dict, list[str], list[di
             else:
                 result_entry["Integrated Loudness (LUFS)"] = f"{lufs_value:.1f}"
             loudness_results.append(result_entry)
-            # Update progress bar
             progress_percent = (i + 1) / total_files
-            lufs_progress.progress(progress_percent, text=f"Calculating LUFS for {f_path.name} ({i+1}/{total_files})")
-        lufs_progress.empty() # Clear progress bar
+            lufs_progress.progress(progress_percent, text=f"Calculating LUFS for {original_name} ({i+1}/{total_files})")
+        lufs_progress.empty()
     else:
          st.write("No suitable WAV files found for LUFS calculation.")
 
     st.write("QC Checks Complete.")
-
     return updated_data, all_messages, loudness_results
 
 # --- UI Layout & Processing ---
-# st.title("Make Scott Proud!") # Replaced with markdown for styling
 st.markdown("<h1 style='text-align: center;'><b>MAKE SCOTT PROUD!</b></h1>", unsafe_allow_html=True)
 st.markdown("---")
 col1, col2 = st.columns([1, 1])
 
-# Function to process dropped files (using st.file_uploader objects)
-def process_dropped_files(uploaded_files):
-    st.session_state.messages = []
-    st.session_state.file_display_data = {}
-    st.session_state.processing_complete = False
-    st.session_state.loudness_results = []
-    all_files_flat = []
-    temp_dir = None
-
-    with st.spinner('Processing uploaded files...'):
-        if uploaded_files:
-            try:
-                temp_dir = tempfile.mkdtemp()
-                temp_dir_path = Path(temp_dir)
-                parent_folders = defaultdict(list) # Use defaultdict
-
-                # Save files and determine intended parent folder
-                for uploaded_file in uploaded_files:
-                    # Use original name for path determination and display
-                    original_name = uploaded_file.name
-                    file_path_in_temp = temp_dir_path / original_name # Keep structure in temp if name has it
-
-                    # Ensure subdirs exist in temp dir if original name has them
-                    file_path_in_temp.parent.mkdir(parents=True, exist_ok=True)
-
-                    with open(file_path_in_temp, "wb") as f:
-                        f.write(uploaded_file.getbuffer())
-
-                    # Determine grouping key based on the *first* directory component
-                    try:
-                        # Use pathlib to handle paths robustly
-                        original_path_obj = Path(original_name)
-                        # Check if there are parent directories in the name
-                        if len(original_path_obj.parts) > 1:
-                             # The first part is the top-level folder (e.g., 'Loops')
-                            grouping_key_name = original_path_obj.parts[0]
-                        else:
-                             # File likely at the root level of the drop
-                            grouping_key_name = "_root_files_"
-                    except Exception:
-                         grouping_key_name = "_error_parsing_name_"
-
-                    grouping_key_path = Path(grouping_key_name)
-                    # Store temp path but use original name later
-                    parent_folders[grouping_key_path].append({
-                        "temp_path": file_path_in_temp,
-                        "original_name": original_name
-                    })
-
-                # Sort parent folders and files within them naturally
-                sorted_parents = sorted(parent_folders.keys(), key=natural_sort_key)
-
-                processed_data = {}
-                all_files_temp_paths = [] # Store temp paths for QC checks
-                for parent_key in sorted_parents:
-                    # Sort files based on the *original* name within the group
-                    sorted_files_info = sorted(parent_folders[parent_key], key=lambda x: natural_sort_key(Path(x['original_name'])))
-
-                    processed_data[parent_key] = [
-                        {
-                            "path": file_info['temp_path'], # Use temp path for checks
-                            "display_name": file_info['original_name'], # Use original name for display/parsing
-                            "issues": []
-                        }
-                        for file_info in sorted_files_info
-                    ]
-                    all_files_temp_paths.extend([f_info['temp_path'] for f_info in sorted_files_info])
-
-                st.session_state.file_display_data = processed_data
-                # We need the flat list of *temporary* paths for some checks if they rely on path object
-                # But many checks use display_name now. Let's store original names flat list for now.
-                st.session_state.all_files_flat_original_names = [f_info['original_name'] for parent in processed_data.keys() for f_info in processed_data[parent]]
-
-                # --- Run QC Checks --- #
-                if st.session_state.file_display_data:
-                    with st.spinner('Running QC Checks...'):
-                        # Pass the structured data using temporary paths but original names
-                        updated_data, qc_messages, loudness_data = run_all_qc_checks(st.session_state.file_display_data)
-                        st.session_state.file_display_data = updated_data
-                        st.session_state.messages = qc_messages
-                        st.session_state.loudness_results = loudness_data
-                else:
-                    st.session_state.messages = ["No files could be processed."]
-
-            except Exception as e:
-                 st.error(f"Error during file processing: {e}")
-                 st.session_state.messages = [f"❌ Error processing files: {e}"]
-            finally:
-                if temp_dir:
-                    try:
-                        shutil.rmtree(temp_dir)
-                        print(f"Removed temp directory: {temp_dir}")
-                    except Exception as e:
-                         print(f"Error removing temp directory {temp_dir}: {e}")
-        else:
-            st.session_state.messages = ["No files uploaded."]
-
-    st.session_state.processing_complete = True
-    st.rerun()
-
 with col1:
-    st.header("Upload Package Folder")
+    st.header("Enter Package Folder Path") # Updated header
 
-    # Use st.file_uploader
-    uploaded_files = st.file_uploader(
-        "Drag and drop the whole package folder here",
-        accept_multiple_files=True,
-        type=["wav", "jpg", "jpeg"], # Specify allowed types
-        key="file_uploader", # Assign a key
-        on_change=lambda: setattr(st.session_state, 'reset_app', False) # Reset flag on new upload
+    # Text input for folder path
+    st.session_state.folder_path = st.text_input(
+        "Enter the full path to the package folder:",
+        value=st.session_state.get('folder_path', ''), # Use existing state value if available
+        key="folder_path_input" # Give it a unique key
     )
 
-    # Button to trigger processing after files are selected
-    if uploaded_files and not st.session_state.processing_complete:
-         if st.button("Process Uploaded Files"):
-            st.session_state.dropped_items = uploaded_files # Store uploaded file objects
-            process_dropped_files(st.session_state.dropped_items)
+    # Button to trigger processing the folder path
+    process_button_placeholder = st.empty()
+    # Display button only if a path is entered and processing hasn't completed
+    if st.session_state.folder_path and not st.session_state.processing_complete:
+        if process_button_placeholder.button("Process Folder Path"):
+            # We'll need to create this function or adapt an existing one
+            process_folder_path(st.session_state.folder_path)
 
-    # Display File List (after processing)
-    if st.session_state.processing_complete and not st.session_state.reset_app:
+    # Display File List (after processing) - Logic remains similar, relies on processing_complete
+    if st.session_state.processing_complete:
         file_list_container = st.container()
         with file_list_container:
             if not st.session_state.file_display_data:
-                st.write("*(No files processed yet)*")
+                 st.info("(No files processed or found based on structure)")
             else:
                 st.write("**Processed Files:**")
-                for parent_folder, files_in_folder in st.session_state.file_display_data.items():
-                    display_parent_name = parent_folder.name # Now uses heuristic name
-                    if display_parent_name == "_root_files_": display_parent_name = "(Root Files)"
+                # Use the keys (Loops, One Shots, _root_files_) for headers
+                # Sort the items alphabetically by key (folder name)
+                for parent_folder_key, files_in_folder in sorted(st.session_state.file_display_data.items()):
+                    # Check if parent_folder_key is a Path object before accessing .name
+                    if isinstance(parent_folder_key, Path):
+                         display_parent_name = parent_folder_key.name
+                         if display_parent_name == "_root_files_": display_parent_name = "(Root Files)"
+                    else: # Handle case where it might be a string or other type
+                        display_parent_name = str(parent_folder_key)
+
                     st.markdown(f"**📁 {display_parent_name}/**")
+                    # File display logic
                     for file_data in files_in_folder:
-                        issues = file_data['issues']
-                        color = "green"
-                        prefix = "📄" # Default
-                        is_artwork = file_data['path'].suffix.lower() in VALID_ARTWORK_EXT
-                        # Check audio based on original name stored in display_name
-                        is_audio = Path(file_data['display_name']).suffix.lower() in VALID_AUDIO_EXT
+                         issues = file_data['issues']
+                         color = "green"
+                         prefix = "📄"
+                         # Use display_name for extension check as it holds original name
+                         is_artwork = Path(file_data['display_name']).suffix.lower() in VALID_ARTWORK_EXT
+                         is_audio = Path(file_data['display_name']).suffix.lower() in VALID_AUDIO_EXT
+                         if is_artwork: prefix = "🖼️"
+                         elif is_audio: prefix = "🎵"
+                         if issues:
+                            # --- Determine Icon and Color based on Issues --- #
+                            has_error = any(i.startswith('audio_error') or i.startswith('artwork_error') for i in issues)
+                            has_spec_issue = any(i in ['audio_format', 'audio_samplerate', 'audio_bitdepth', 'audio_channels', 'audio_clipping', 'audio_silence', 'audio_zero_crossing', 'audio_bar_length'] for i in issues)
+                            has_art_issue = any(i in ['artwork_format', 'artwork_size', 'artwork_dims', 'artwork_square'] for i in issues)
+                            has_order_issue = any(i.startswith('sample_order') for i in issues)
+                            has_naming_issue = any(i in ['artwork_naming', 'demo_naming', 'demo_multiple', 'demo_missing_suffix'] for i in issues)
+                            has_spelling_issue = 'spelling' in issues
+                            has_spacing_issue = 'spacing' in issues
+                            has_potential_demo = 'potential_demo_extra' in issues
 
-                        if is_artwork:
-                            prefix = "🖼️"
-                        elif is_audio:
-                             prefix = "🎵"
+                            # Set color/prefix based on severity
+                            if has_error: color, prefix = "red", "💥"
+                            elif has_spec_issue or has_art_issue: color, prefix = "red", "❌"
+                            elif has_order_issue: color, prefix = "purple", "🔢"
+                            elif has_naming_issue: color, prefix = "orange", "❓"
+                            elif has_spelling_issue: color, prefix = "#FFC300", "🔡"
+                            elif has_spacing_issue or has_potential_demo: color, prefix = "yellow", "⚠️"
+                            # -- New logic: Check for OK status if no specific error was found yet -- #
+                            elif 'artwork_ok' in issues:
+                                color = "green" # Keep color green
+                                # prefix is already '🖼️' from the type check above
+                            elif 'demo_ok' in issues:
+                                color = "green" # Keep color green
+                                # prefix is already '🎵' from the type check above
+                            # -- End of new logic -- #
+                            else: # Fallback for any other unhandled issue in the list
+                                color, prefix = "grey", "❔"
+                         # If the 'issues' list was empty, color remains 'green' and prefix is the type icon
 
-                        if issues:
-                             # Determine worst issue for color/icon (more refined)
-                             has_error = any(i.startswith('audio_error') or i.startswith('artwork_error') for i in issues)
-                             has_spec_issue = any(i in ['audio_format', 'audio_samplerate', 'audio_bitdepth', 'audio_channels', 'audio_clipping', 'audio_silence', 'audio_zero_crossing', 'audio_bar_length'] for i in issues)
-                             has_art_issue = any(i in ['artwork_format', 'artwork_size', 'artwork_dims', 'artwork_square'] for i in issues)
-                             has_order_issue = any(i.startswith('sample_order') for i in issues)
-                             has_naming_issue = any(i in ['artwork_naming', 'demo_naming', 'demo_multiple'] for i in issues)
-                             has_spelling_issue = 'spelling' in issues # Check for spelling issue
-                             has_spacing_issue = 'spacing' in issues
-                             has_potential_demo = 'potential_demo_extra' in issues
-
-                             if has_error:
-                                 color = "red"
-                                 prefix = "💥" # Error reading file
-                             elif has_spec_issue or has_art_issue:
-                                 color = "red"
-                                 prefix = "❌" # Spec violation
-                             elif has_order_issue:
-                                 color = "purple" # Order issues distinct color
-                                 prefix = "🔢"
-                             elif has_naming_issue:
-                                 color = "orange"
-                                 prefix = "❓" # Naming/Demo issues
-                             elif has_spelling_issue:
-                                 color = "#FFC300" # Darker Yellow / Gold for spelling
-                                 prefix = "🔡"
-                             elif has_spacing_issue or has_potential_demo:
-                                 color = "yellow"
-                                 prefix = "⚠️" # Minor issues
-                             else:
-                                 color = "grey"
-                                 prefix = "❔" # Unknown issue type
-
-                        display_text = file_data['display_name']
-                        st.markdown(f"&nbsp;&nbsp;&nbsp;&nbsp;<span style='color:{color};'>{prefix} {display_text}</span>", unsafe_allow_html=True)
-
+                         # Ensure display_name exists and is a string
+                         display_text = str(file_data.get('display_name', 'Unknown File'))
+                         st.markdown(f"&nbsp;&nbsp;&nbsp;&nbsp;<span style='color:{color};'>{prefix} {display_text}</span>", unsafe_allow_html=True)
                 st.markdown("---")
-    elif not uploaded_files and not st.session_state.processing_complete:
-         st.info("Upload files using the browser above.")
+    # Initial placeholder for file list area - Updated condition
+    elif not st.session_state.folder_path:
+         st.info("Enter a folder path above and click 'Process Folder Path'.")
+    elif not st.session_state.processing_complete:
+         st.info("Click 'Process Folder Path' to start.")
 
 
     # --- Buttons --- #
@@ -1107,6 +1075,7 @@ with col1:
     sorted_msgs = get_sorted_messages(st.session_state.messages)
     results_text = "\n".join(sorted_msgs)
     with btn_col1:
+        # ... (Copy button)
         if st.button("📋 COPY RESULTS", disabled=(not st.session_state.messages)):
             try:
                 pyperclip.copy(results_text)
@@ -1114,22 +1083,21 @@ with col1:
             except Exception as e:
                 st.toast(f"Error copying: {e}", icon="❌")
     with btn_col2:
+        # ... (Export button)
         st.download_button(
             label="⬆️ EXPORT RESULTS", data=results_text, file_name="QC_Results.txt",
             mime="text/plain", disabled=(not st.session_state.messages)
         )
     with btn_col3:
+        # ... (Reset button)
         if st.button("✨ RESET"):
-            # Clear state, including uploader state by rerunning
-            st.session_state.dropped_items = None
+            st.session_state.uploaded_files_state = [] # Clear stored files
             st.session_state.messages = []
             st.session_state.file_display_data = {}
             st.session_state.processing_complete = False
-            st.session_state.reset_app = True # This might not be needed now
             st.session_state.loudness_results = []
-            if 'all_files_flat_original_names' in st.session_state: del st.session_state.all_files_flat_original_names
-            # Clear the file uploader widget state requires a more complex approach or relying on rerun
-            # st.session_state.file_uploader = [] # This might work depending on Streamlit version
+            # Need to clear the file uploader explicitly if possible, or rely on rerun
+            # Setting key might trigger rerun and clearing
             st.rerun()
 
 with col2:
@@ -1150,8 +1118,6 @@ loudness_df = None
 if st.session_state.processing_complete and st.session_state.loudness_results:
     # Create DataFrame for display
     loudness_df = pd.DataFrame(st.session_state.loudness_results)
-    st.dataframe(loudness_df, use_container_width=True)
-
     # --- Find Loudest/Quietest --- #
     valid_lufs_entries = []
     for entry in st.session_state.loudness_results:
@@ -1197,6 +1163,9 @@ if st.session_state.processing_complete and st.session_state.loudness_results:
                  st.metric(label="🤫 Quietest File", value=lufs_display, delta=quietest_file['filename'])
              else:
                  st.info("No valid loudness data for quietest file.")
+
+    # Display the DataFrame Table AFTER the extremes
+    st.dataframe(loudness_df, use_container_width=True)
 
 elif st.session_state.processing_complete:
     st.info("No suitable WAV files found or processed for loudness analysis.")
