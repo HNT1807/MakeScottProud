@@ -1,0 +1,11 @@
+streamlit
+pydub # For audio processing (reading format, silence, clipping, duration)
+numpy # For numerical operations (RMS, sample checks)
+natsort # For natural sorting of filenames
+pyspellchecker # For spell checking
+pillow # For image processing (artwork checks)
+# streamlit_dropzone removed as it doesn't exist / not needed
+pyperclip # For copying results to clipboard
+soundfile # Dependency for pyloudnorm
+pyloudnorm # For LUFS calculation
+pandas # For displaying LUFS table 
