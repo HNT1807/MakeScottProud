@@ -16,6 +16,8 @@ import pyloudnorm as pyln
 import pandas as pd
 import shutil
 import tempfile
+import zipfile
+from io import StringIO
 
 # --- Constants ---
 VALID_SUBFOLDERS = {"Loops", "One Shots"}
@@ -52,9 +54,13 @@ SPELLCHECK_SPLIT_WORDS_PATTERN = re.compile(r"[A-Z]?[a-z]+|[A-Z]+(?=[A-Z][a-z]|$
 st.set_page_config(layout="wide", page_title="Make Scott Proud!")
 
 # --- State Management ---
-# State for text input approach
-if 'folder_path' not in st.session_state:
-    st.session_state.folder_path = ""
+# Remove folder_path text input state
+# if 'folder_path' not in st.session_state:
+#     st.session_state.folder_path = ""
+if 'uploaded_zip_path' not in st.session_state:
+    st.session_state.uploaded_zip_path = None
+if 'extracted_temp_dir' not in st.session_state:
+    st.session_state.extracted_temp_dir = None # To store path for cleanup
 if 'messages' not in st.session_state:
     st.session_state.messages = []
 if 'file_display_data' not in st.session_state:
@@ -820,7 +826,8 @@ def calculate_integrated_loudness(file_path: Path) -> float | None:
 # --- New function to process folder path ---
 def process_folder_path(folder_path_str: str):
     """Processes files directly from a given folder path, handling subdirs dynamically."""
-    st.session_state.messages = []
+    # Clear previous results *before* processing new path
+    st.session_state.messages = [] 
     st.session_state.file_display_data = {}
     st.session_state.processing_complete = False
     st.session_state.loudness_results = []
@@ -1007,175 +1014,225 @@ st.markdown("---")
 col1, col2 = st.columns([1, 1])
 
 with col1:
-    st.header("Enter Package Folder Path") # Updated header
+    # Center the header using markdown and HTML
+    st.markdown("<h2 style='text-align: center;'>Upload Package Folder (ZIP)</h2>", unsafe_allow_html=True)
 
-    # Text input for folder path
-    st.session_state.folder_path = st.text_input(
-        "Enter the full path to the package folder:",
-        value=st.session_state.get('folder_path', ''), # Use existing state value if available
-        key="folder_path_input" # Give it a unique key
+    uploaded_file = st.file_uploader(
+        "Upload the package folder as a single .zip file:",
+        type=["zip"],
+        accept_multiple_files=False,
+        key="zip_uploader" # Unique key for the uploader
     )
 
-    # Button to trigger processing the folder path
-    process_button_placeholder = st.empty()
-    # Display button only if a path is entered and processing hasn't completed
-    if st.session_state.folder_path and not st.session_state.processing_complete:
-        if process_button_placeholder.button("Process Folder Path"):
-            # We'll need to create this function or adapt an existing one
-            process_folder_path(st.session_state.folder_path)
+    # Remove old text input and button logic
+    # st.session_state.folder_path = st.text_input(...)
+    # process_button_placeholder = st.empty()
+    # if st.session_state.folder_path and not st.session_state.processing_complete:
+    #    if process_button_placeholder.button("Process Folder Path"):
+    #        process_folder_path(st.session_state.folder_path)
 
-    # Display File List (after processing) - Logic remains similar, relies on processing_complete
-    if st.session_state.processing_complete:
-        file_list_container = st.container()
-        with file_list_container:
-            if not st.session_state.file_display_data:
-                 st.info("(No files processed or found based on structure)")
-            else:
-                st.write("**Processed Files:**")
-                # Use the keys (Loops, One Shots, _root_files_) for headers
-                # Sort the items alphabetically by key (folder name)
-                for parent_folder_key, files_in_folder in sorted(st.session_state.file_display_data.items()):
-                    # Check if parent_folder_key is a Path object before accessing .name
-                    if isinstance(parent_folder_key, Path):
-                         display_parent_name = parent_folder_key.name
-                         if display_parent_name == "_root_files_": display_parent_name = "(Root Files)"
-                    else: # Handle case where it might be a string or other type
-                        display_parent_name = str(parent_folder_key)
+    # --- Extraction and Processing Logic (NEW) --- 
+    if uploaded_file is not None:
+        # Check if we've already processed this specific upload
+        # This prevents re-processing on every script rerun after upload
+        if st.session_state.uploaded_zip_path != uploaded_file.file_id:
+            
+            # Clear previous potential temp dir before creating new one
+            if st.session_state.extracted_temp_dir:
+                print(f"Attempting cleanup of old temp dir: {st.session_state.extracted_temp_dir}")
+                shutil.rmtree(st.session_state.extracted_temp_dir, ignore_errors=True)
+                st.session_state.extracted_temp_dir = None
 
-                    st.markdown(f"**📁 {display_parent_name}/**")
-                    # File display logic
-                    for file_data in files_in_folder:
-                         issues = file_data['issues']
-                         color = "green"
-                         prefix = "📄"
-                         # Use display_name for extension check as it holds original name
-                         is_artwork = Path(file_data['display_name']).suffix.lower() in VALID_ARTWORK_EXT
-                         is_audio = Path(file_data['display_name']).suffix.lower() in VALID_AUDIO_EXT
-                         if is_artwork: prefix = "🖼️"
-                         elif is_audio: prefix = "🎵"
-                         if issues:
-                            # --- Determine Icon and Color based on Issues --- #
-                            has_error = any(i.startswith('audio_error') or i.startswith('artwork_error') for i in issues)
-                            has_clipping_issue = 'audio_clipping' in issues # Added check
-                            has_zero_crossing_issue = 'audio_zero_crossing' in issues
-                            spec_issue_types = ['audio_format', 'audio_samplerate', 'audio_bitdepth', 'audio_channels', 'audio_silence', 'audio_bar_length'] # Excludes zero crossing and clipping
-                            has_spec_issue = any(i in spec_issue_types for i in issues)
-                            has_art_issue = any(i in ['artwork_format', 'artwork_size', 'artwork_dims', 'artwork_square'] for i in issues)
-                            has_order_issue = any(i.startswith('sample_order') for i in issues)
-                            has_naming_issue = any(i in ['artwork_naming', 'demo_naming', 'demo_multiple', 'demo_missing_suffix'] for i in issues)
-                            has_spelling_issue = 'spelling' in issues
-                            has_spacing_issue = 'spacing' in issues
-                            has_potential_demo = 'potential_demo_extra' in issues
+            st.session_state.uploaded_zip_path = uploaded_file.file_id # Store file_id
+            st.session_state.processing_complete = False # Reset processing status
+            st.session_state.messages = ["🏁 Starting processing..."] # Initial message
+            st.session_state.file_display_data = {}
+            st.session_state.loudness_results = []
 
-                            # --- Collect all relevant icons --- #
-                            icons_list = []
-                            if has_error: icons_list.append("💥")
-                            if has_clipping_issue: icons_list.append("📎") # Added clipping icon
-                            if has_spec_issue or has_art_issue: icons_list.append("❌")
-                            if has_zero_crossing_issue: icons_list.append("🔈") # Changed back to speaker as requested
-                            if has_order_issue: icons_list.append("🔢")
-                            if has_naming_issue: icons_list.append("❓")
-                            if has_spelling_issue: icons_list.append("🔡")
-                            if has_spacing_issue or has_potential_demo: # Combine spacing/potential demo visually
-                                if "⚠️" not in icons_list: icons_list.append("⚠️")
-                            if 'audio_silence' in issues: icons_list.append("👂") # Added silent icon
-
-                            # --- Determine final color based on highest priority issue found --- #
-                            final_color = "green" # Default
-                            if has_error:
-                                final_color = "red"
-                            elif has_clipping_issue: # High priority error
-                                final_color = "red"
-                            elif has_spec_issue or has_art_issue:
-                                final_color = "red"
-                            elif has_zero_crossing_issue:
-                                final_color = "#FFA500" # Orange
-                            elif has_order_issue:
-                                final_color = "purple"
-                            elif has_naming_issue:
-                                final_color = "orange"
-                            elif has_spelling_issue:
-                                final_color = "#FFC300" # Yellow/Orange
-                            elif has_spacing_issue or has_potential_demo:
-                                final_color = "yellow"
-                            elif 'audio_silence' in issues:
-                                final_color = "grey"
-                            elif 'artwork_ok' in issues or 'demo_ok' in issues:
-                                 final_color = "green"
-                            elif issues: # Catch any other unforeseen issue
-                                final_color = "grey"
-                                if not icons_list: icons_list.append("❔") # Add generic if no specific icon applies
-
-                            # --- Construct the prefix string --- #
-                            final_prefix = "".join(icons_list)
-
-                            # Handle cases with no specific issue icons (use default type icon)
-                            if not final_prefix:
-                                if is_artwork: final_prefix = "🖼️"
-                                elif is_audio: final_prefix = "🎵"
-                                else: final_prefix = "📄" # Should not happen if 'issues' has content, but safe fallback
-                                final_color = "green" # Ensure color is green if only OK issues or none
-
-                         else: # No issues found at all
-                             final_prefix = prefix # Use the default type icon (🖼️, 🎵, 📄)
-                             final_color = "green"
-
-                         # Ensure display_name exists and is a string
-                         display_text = str(file_data.get('display_name', 'Unknown File'))
-                         st.markdown(f"&nbsp;&nbsp;&nbsp;&nbsp;<span style='color:{final_color};'>{final_prefix} {display_text}</span>", unsafe_allow_html=True)
-                st.markdown("---")
-    # Initial placeholder for file list area - Updated condition
-    elif not st.session_state.folder_path:
-         st.info("Enter a folder path above and click 'Process Folder Path'.")
-    elif not st.session_state.processing_complete:
-         st.info("Click 'Process Folder Path' to start.")
-
-
-    # --- Buttons --- #
-    st.markdown("---")
-    btn_col1, btn_col2, btn_col3, btn_col4 = st.columns(4)
-    sorted_msgs = get_sorted_messages(st.session_state.messages)
-    results_text = "\n".join(sorted_msgs)
-    with btn_col1:
-        # ... (Copy button)
-        if st.button("📋 COPY RESULTS", disabled=(not st.session_state.messages)):
+            progress_bar = st.progress(0, text="Extracting ZIP file...")
             try:
-                pyperclip.copy(results_text)
-                st.toast("Results copied to clipboard!", icon="📋")
+                # Create a temporary directory
+                temp_dir = tempfile.mkdtemp()
+                st.session_state.extracted_temp_dir = temp_dir # Store for cleanup
+                temp_dir_path = Path(temp_dir)
+                print(f"Created temp dir: {temp_dir}")
+
+                # Extract the zip file
+                with zipfile.ZipFile(uploaded_file, 'r') as zip_ref:
+                    zip_ref.extractall(temp_dir_path)
+                progress_bar.progress(0.5, text="ZIP extracted. Finding content root...")
+                print(f"Extracted zip to: {temp_dir}")
+
+                # --- Determine the actual content root --- #
+                # List items in the temp dir
+                extracted_items = list(temp_dir_path.iterdir())
+                # Filter out macOS metadata folders/files if they exist
+                extracted_items = [item for item in extracted_items if item.name != '__MACOSX' and not item.name.startswith('._')]
+                
+                content_root_path = temp_dir_path
+                if len(extracted_items) == 1 and extracted_items[0].is_dir():
+                    # If there's exactly one item and it's a directory, assume it's the root
+                    content_root_path = extracted_items[0]
+                    print(f"Single root folder found: {content_root_path.name}. Using it as content root.")
+                else:
+                    print("Multiple items or no single root folder found. Using temp dir as content root.")
+
+                progress_bar.progress(0.7, text="Starting QC checks...")
+
+                # Trigger processing with the determined content root path
+                # Ensure process_folder_path clears previous results internally
+                process_folder_path(str(content_root_path))
+                # No need to call rerun here, process_folder_path ends with rerun
+
+            except zipfile.BadZipFile:
+                st.error("Error: Uploaded file is not a valid ZIP archive.")
+                st.session_state.messages = ["❌ Error: Invalid ZIP file."]
+                st.session_state.processing_complete = True
+                if st.session_state.extracted_temp_dir:
+                    shutil.rmtree(st.session_state.extracted_temp_dir, ignore_errors=True)
+                    st.session_state.extracted_temp_dir = None
+                st.rerun()
             except Exception as e:
-                st.toast(f"Error copying: {e}", icon="❌")
-    with btn_col2:
-        # ... (Export button)
-        st.download_button(
-            label="⬆️ EXPORT RESULTS", data=results_text, file_name="QC_Results.txt",
-            mime="text/plain", disabled=(not st.session_state.messages)
-        )
-    with btn_col3:
-        # ... (Reset button)
-        if st.button("✨ RESET"):
+                st.error(f"An error occurred during extraction or processing: {e}")
+                st.session_state.messages = [f"❌ Error: {e}"]
+                st.session_state.processing_complete = True
+                if st.session_state.extracted_temp_dir:
+                    shutil.rmtree(st.session_state.extracted_temp_dir, ignore_errors=True)
+                    st.session_state.extracted_temp_dir = None
+                st.rerun()
+            finally:
+                # Ensure progress bar is removed
+                progress_bar.empty()
+        # else: # Optional: uncomment to see when it skips reprocessing
+        #     print("Skipping re-processing of already uploaded file.")
+        
+    # --- File List Display (Restored) ---
+    if st.session_state.processing_complete and st.session_state.file_display_data:
+        st.markdown("---")
+        st.subheader("Processed Files")
+        # Iterate through subfolders and files
+        for subfolder, files in st.session_state.file_display_data.items():
+            # Handle root files display name
+            display_folder_name = "Root Folder Files" if subfolder == "_root_files_" else subfolder
+            with st.expander(f"**{display_folder_name}** ({len(files)} files)", expanded=True):
+                for file_data in files:
+                    display_name = file_data['display_name']
+                    issues = file_data['issues']
+                    icon = "✅"
+                    color = "#4CAF50" # Green
+                    tooltip_text = "No issues detected."
+                    # Simplified issue prioritization for example
+                    if issues:
+                        issue_str = ", ".join(issues)
+                        # Prioritize Errors first
+                        error_keywords = ['error', 'format', 'missing', 'spacing', 'artwork_naming', 'failed', 'duplicate', 'incorrect', 'order'] # Added order
+                        warning_keywords = ['clipping', 'length', 'crossing', 'samplerate', 'bitdepth', 'channels', 'size', 'dims', 'square', 'naming', 'spelling', 'gap', 'demo_missing_suffix'] # Added demo suffix
+                        info_keywords = ['silence'] 
+                        
+                        if any(kw in issue for issue in issues for kw in error_keywords):
+                            icon = "❌"
+                            color = "#F44336" # Red
+                            tooltip_text = f"Errors: {issue_str}"
+                        elif any(kw in issue for issue in issues for kw in warning_keywords):
+                            icon = "⚠️"
+                            color = "#FFC107" # Amber
+                            tooltip_text = f"Warnings: {issue_str}"
+                        elif any(kw in issue for issue in issues for kw in info_keywords):
+                            icon = "👂"
+                            color = "#2196F3" # Blue
+                            tooltip_text = f"Info: {issue_str}"
+                        else: # Fallback for unclassified issues like ok markers
+                            # Check for positive markers if no negative ones found
+                            if 'demo_ok' in issues or 'artwork_ok' in issues:
+                                icon = "✅"
+                                color = "#4CAF50"
+                                tooltip_text = f"Status: {issue_str}"
+                            else:
+                                icon = "ℹ️" # Default info for uncategorized
+                                color = "grey"
+                                tooltip_text = f"Info: {issue_str}"
+                                
+                    # Display filename with icon and color, NO individual copy button
+                    st.markdown(f"<span style='color:{color};' title='{tooltip_text}'>{icon} {display_name}</span>", unsafe_allow_html=True)
+
+    # Initial placeholder for file list area - Updated condition
+    elif uploaded_file is None:
+         st.info("Upload the package folder as a .zip file to begin.")
+    elif not st.session_state.processing_complete and st.session_state.uploaded_zip_path is not None:
+         st.info("Processing uploaded file...") # Show processing message
+
+    # --- Buttons (Adjusted) --- #
+    # Removed btn_col1, btn_col2, btn_col3 = st.columns(3)
+
+    # Removed 'Copy All Filenames' button
+    # btn_col2 is empty
+
+    # Center the Reset button
+    _, center_reset_col, _ = st.columns([1, 1, 1]) # Use columns for centering
+    with center_reset_col:
+        if st.button("✨ RESET", use_container_width=True): # Add use_container_width
+            # --- Add cleanup for temp directory --- #
+            if st.session_state.extracted_temp_dir:
+                print(f"Reset requested. Cleaning up temp dir: {st.session_state.extracted_temp_dir}")
+                shutil.rmtree(st.session_state.extracted_temp_dir, ignore_errors=True)
+                st.session_state.extracted_temp_dir = None
+            # --- End of cleanup add --- #
             # Clear results and internal state
-            st.session_state.uploaded_files_state = [] # Clear stored files (legacy, might remove later)
+            st.session_state.uploaded_zip_path = None # Clear uploaded file tracking
             st.session_state.messages = []
             st.session_state.file_display_data = {}
             st.session_state.processing_complete = False
             st.session_state.loudness_results = []
-            # --- Add this line to clear the text input --- #
-            st.session_state.folder_path = ""
-            # --- End of added line ---
-            # Need to clear the file uploader explicitly if possible, or rely on rerun
-            # Setting key might trigger rerun and clearing
             st.rerun()
 
 with col2:
-    st.header("QC Results")
+    # Center the header using markdown and HTML
+    st.markdown("<h2 style='text-align: center;'>QC Results</h2>", unsafe_allow_html=True)
     results_container = st.container()
+    sorted_msgs = [] # Define outside the else block
+    txt_data = "" # Define txt_data outside the block as well
     with results_container:
         if not st.session_state.messages:
-            st.write("*(Results will appear here after processing)*")
+            # Center the placeholder text
+            st.markdown("<p style='text-align: center; color: grey;'><i>(Results will appear here after processing)</i></p>", unsafe_allow_html=True)
+            # st.write("*(Results will appear here after processing)*") # Removed original write
         else:
-            # Display sorted messages (using the already sorted list)
+            # Sort messages before displaying
+            sorted_msgs = get_sorted_messages(st.session_state.messages)
+            # Format messages for text file/clipboard (simple join with newlines)
+            txt_data = "\n".join(sorted_msgs)
+            # Display sorted messages (using the now defined sorted_msgs)
             for msg in sorted_msgs:
                 st.markdown(msg)
+                
+    # --- Add TXT Export & Copy Buttons for QC Results (Centered) --- #
+    if st.session_state.processing_complete and sorted_msgs:
+        # Add vertical space before buttons
+        st.markdown("<br>", unsafe_allow_html=True)
+        # Use columns to center the buttons vertically
+        _, center_col, _ = st.columns([1, 2, 1]) # Adjust ratios if needed
+        with center_col:
+            # Export Button
+            st.download_button(
+                label="💾 Export QC Results (.txt)",
+                data=txt_data,
+                file_name="qc_results_report.txt",
+                mime="text/plain",
+                key="export_txt_button",
+                use_container_width=True # Make button fill the center column
+            )
+            # Copy Button
+            if st.button("📋 Copy QC Results", key="copy_qc_button", use_container_width=True):
+                pyperclip.copy(txt_data)
+                st.toast("Copied QC results to clipboard!")
+    else:
+        # Add vertical space before disabled buttons as well
+        st.markdown("<br>", unsafe_allow_html=True)
+        # Show disabled buttons, also centered
+        _, center_col, _ = st.columns([1, 2, 1])
+        with center_col:
+            st.button("💾 Export QC Results (.txt)", disabled=True, use_container_width=True)
+            st.button("📋 Copy QC Results", disabled=True, use_container_width=True)
 
 # --- Loudness Table Display (Below Columns) --- #
 st.markdown("---")
