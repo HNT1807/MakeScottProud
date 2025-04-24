@@ -1163,31 +1163,33 @@ with col1:
 
     # --- Buttons (Adjusted) --- #
     # Removed btn_col1, btn_col2, btn_col3 = st.columns(3)
-
     # Removed 'Copy All Filenames' button
     # btn_col2 is empty
 
-    # Center the Reset button
-    _, center_reset_col, _ = st.columns([1, 1, 1]) # Use columns for centering
-    with center_reset_col:
-        if st.button("✨ RESET", use_container_width=True): # Add use_container_width
-            # --- Add cleanup for temp directory --- #
-            if st.session_state.extracted_temp_dir:
-                print(f"Reset requested. Cleaning up temp dir: {st.session_state.extracted_temp_dir}")
-                shutil.rmtree(st.session_state.extracted_temp_dir, ignore_errors=True)
-                st.session_state.extracted_temp_dir = None
-            # --- End of cleanup add --- #
-            # Clear results and internal state
-            st.session_state.uploaded_zip_path = None # Clear uploaded file tracking
-            st.session_state.messages = []
-            st.session_state.file_display_data = {}
-            st.session_state.processing_complete = False
-            st.session_state.loudness_results = []
-            st.rerun()
+    # Center the Reset button # -- REMOVING THIS SECTION --
+    # _, center_reset_col, _ = st.columns([1, 1, 1]) # Use columns for centering
+    # with center_reset_col:
+    #     if st.button("✨ RESET", use_container_width=True): # Add use_container_width
+    #         # --- Add cleanup for temp directory --- #
+    #         if st.session_state.extracted_temp_dir:
+    #             print(f"Reset requested. Cleaning up temp dir: {st.session_state.extracted_temp_dir}")
+    #             shutil.rmtree(st.session_state.extracted_temp_dir, ignore_errors=True)
+    #             st.session_state.extracted_temp_dir = None
+    #         # --- End of cleanup add --- #
+    #         # Clear results and internal state
+    #         st.session_state.uploaded_zip_path = None # Clear uploaded file tracking
+    #         st.session_state.messages = []
+    #         st.session_state.file_display_data = {}
+    #         st.session_state.processing_complete = False
+    #         st.session_state.loudness_results = []
+    #         st.rerun()
+    pass # Add pass if no other elements remain directly under col1
 
 with col2:
     # Center the header using markdown and HTML
     st.markdown("<h2 style='text-align: center;'>QC Results</h2>", unsafe_allow_html=True)
+    # Add vertical space after the header
+    st.markdown("<br>", unsafe_allow_html=True)
     results_container = st.container()
     sorted_msgs = [] # Define outside the else block
     txt_data = "" # Define txt_data outside the block as well
