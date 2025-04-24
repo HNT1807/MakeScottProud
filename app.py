@@ -681,14 +681,18 @@ def validate_sample_order(file_display_data: dict) -> tuple[dict, list[str]]:
         # Get the current order based on original file positions within the folder
         # The `files_in_folder` list used to build `sample_infos` is already sorted naturally
         # So, we just need to compare the `expected_sorted_list` paths to the `group_file_list` paths
-        current_paths = [fd['path'] for fd in group_file_list]
+        # Re-fetch current order based on original index just to be safe
+        current_ordered_list = sorted(group_file_list, key=lambda fd: fd['parsed_info']['original_index'])
+        current_paths = [fd['path'] for fd in current_ordered_list]
         expected_paths = [fd['path'] for fd in expected_sorted_list]
 
         if current_paths != expected_paths:
             messages.append(f"❌ Sample Order Issue: Group '{group_name_display}' ({attribute_type_display})")
-            # Provide more detailed feedback (optional, can be verbose)
-            # messages.append(f"    Current : { [p.name for p in current_paths] }")
-            # messages.append(f"    Expected: { [p.name for p in expected_paths] }")
+            # Provide more detailed feedback
+            current_names = [p.name for p in current_paths]
+            expected_names = [p.name for p in expected_paths]
+            messages.append(f"    Current Order : {current_names}")
+            messages.append(f"    Expected Order: {expected_names} (Sort: BPM -> Alpha Key -> Seq)")
             has_order_issue = True
             for fd in group_file_list: add_issue(fd, 'sample_order_incorrect')
 
