@@ -87,43 +87,73 @@ def get_normalized_samples(audio: AudioSegment) -> np.ndarray | None:
         return None
 
 def get_sorted_messages(messages: list[str]) -> list[str]:
-    """Sorts messages by type (✅, ❔, ❌)."""
-    success_msgs = sorted([m for m in messages if m.startswith("✅")])
-    warning_msgs = sorted([m for m in messages if m.startswith("❔")])
-    error_msgs = sorted([m for m in messages if m.startswith("❌")])
-    return success_msgs + warning_msgs + error_msgs
+    """Sorts messages by icon prefix and adds blank lines between groups."""
+    # Define the desired order of icons
+    icon_order = [
+        "✅", "❔", "💥", "❌",
+        "📎", # Added Clipping icon
+        "📏", "🔈", "👂", "🔢", "❓", "��", "⚠️"
+    ]
+    # Use defaultdict to group messages by their first character (icon)
+    grouped_messages = defaultdict(list)
+    other_messages = [] # For messages with unknown/no icon
+
+    for msg in messages:
+        found_prefix = False
+        for icon in icon_order:
+            if msg.startswith(icon):
+                grouped_messages[icon].append(msg)
+                found_prefix = True
+                break
+        if not found_prefix:
+            other_messages.append(msg)
+
+    # Build the final list in the specified order, adding separators
+    final_messages = []
+    for icon in icon_order:
+        if icon in grouped_messages:
+            # Add separator if this is not the first group being added
+            if final_messages:
+                final_messages.append("")
+            # Add sorted messages for this icon group
+            final_messages.extend(sorted(grouped_messages[icon]))
+
+    # Add any messages with unknown/no prefixes at the end
+    if other_messages:
+        if final_messages:
+            final_messages.append("")
+        final_messages.extend(sorted(other_messages))
+
+    return final_messages
 
 # --- QC Check Functions ---
 # Define validate_folder_names to work with actual subdirs
 def validate_folder_names(file_display_data: dict) -> list[str]:
-    """Checks if required subfolders ('Loops', 'One Shots') are present 
-       among the found subfolders and flags missing/extra ones."""
+    """Checks if any found subfolders have names other than 'Loops' or 'One Shots'."""
     messages = []
-    required_missing = []
+    # required_missing = [] # Removed
     invalid_found = []
     
     # Get the names of the subfolders actually found and processed
     # Exclude the special key for root files
     found_subfolder_names = {key for key in file_display_data if key != "_root_files_"}
 
-    # Check for missing required folders
-    for req_folder in VALID_SUBFOLDERS:
-        if req_folder not in found_subfolder_names:
-            required_missing.append(req_folder)
+    # # Check for missing required folders # Removed
+    # for req_folder in VALID_SUBFOLDERS:
+    #     if req_folder not in found_subfolder_names:
+    #         required_missing.append(req_folder)
 
     # Check for unexpected folders found among the processed ones
     for found_folder in found_subfolder_names:
          if found_folder not in VALID_SUBFOLDERS:
              invalid_found.append(found_folder)
 
-    if not required_missing and not invalid_found:
-        messages.append(f"✅ Required folders found ('{ '/'.join(VALID_SUBFOLDERS) }')")
+    # Report error only if invalid folders were found
+    if invalid_found:
+        messages.append(f"❔ Unexpected subfolders found: {invalid_found}. Only '{ '/'.join(VALID_SUBFOLDERS) }' allowed if subfolders exist.")
     else:
-        if required_missing:
-             messages.append(f"❌ Missing required folders: {required_missing}")
-        if invalid_found:
-             # Report the extra folders found
-             messages.append(f"❌ Unexpected subfolders found: {invalid_found}. Only '{ '/'.join(VALID_SUBFOLDERS) }' expected.")
+        # Success message if no invalid folders found (even if no subfolders exist)
+        messages.append(f"✅ Subfolder names are valid (if any subfolders exist). Allowed: '{ '/'.join(VALID_SUBFOLDERS) }'")
 
     return messages
 
@@ -185,11 +215,11 @@ def validate_demo_file(file_display_data: dict) -> tuple[dict, list[str]]:
                     potential_demos.append(file_data)
 
         if potential_demos:
-            messages.append(f"❌ Missing Demo file (None ending in '{DEMO_SUFFIX}', but found files with ' - ')")
+            messages.append(f"❔ Missing Demo file or mispelled one (must end with '{DEMO_SUFFIX}')")
             for file_data in potential_demos:
                 add_issue(file_data, 'demo_missing_suffix')
         else:
-            messages.append(f"❌ Missing Demo file (None ending in '{DEMO_SUFFIX}')")
+            messages.append(f"❔ Missing Demo file or mispelled one (must end with '{DEMO_SUFFIX}')")
 
     return updated_file_data, messages
 
@@ -269,7 +299,7 @@ def validate_artwork(file_display_data: dict) -> tuple[dict, list[str]]:
         messages.append(f"✅ Artwork found: '{first_valid_artwork_name}'")
     else:
         # No valid artwork found after checking all files
-        messages.append(f"❌ Missing valid Artwork file ({ARTWORK_SUFFIX}{TARGET_ARTWORK_EXT})")
+        messages.append(f"❔ Missing Artwork file or mispelled one (must end with '{ARTWORK_SUFFIX}.jpg')")
         # Optionally, add warnings about files that were close (e.g., named correctly but failed specs)
 
     return updated_file_data, messages
@@ -343,18 +373,19 @@ def validate_audio_specs(file_display_data: dict) -> tuple[dict, list[str]]:
 
     # Report overall status
     if not has_any_spec_issue and checked_files > 0:
-        messages.append("✅ Audio file specs correct (for .wav)")
+        messages.append("✅ Audio file specs correct")
     elif checked_files == 0 and not found_non_wav:
         messages.append("❔ No .wav files found to check specs.")
 
     return updated_file_data, messages
 
 def validate_clipping(file_display_data: dict) -> tuple[dict, list[str]]:
-    """Checks audio files for clipping."""
+    """Checks audio files for clipping (peaks >= 0.999)."""
     messages = []
     updated_file_data = file_display_data
     has_clipping = False
     checked_files = 0
+    CLIP_THRESHOLD = 0.999 # Define threshold slightly below 1.0
     for subfolder, files in updated_file_data.items():
         for file_data in files:
             f_path = file_data['path']
@@ -364,13 +395,12 @@ def validate_clipping(file_display_data: dict) -> tuple[dict, list[str]]:
             try:
                 audio = AudioSegment.from_file(str(f_path))
                 samples = get_normalized_samples(audio)
-                if samples is not None and np.max(np.abs(samples)) >= 1.0:
-                    messages.append(f"❌ Clipping detected in '{file_data['display_name']}'")
+                if samples is not None and np.max(np.abs(samples)) >= CLIP_THRESHOLD:
+                    messages.append(f"📎 Clipping detected in '{file_data['display_name']}')") # Changed icon
                     add_issue(file_data, 'audio_clipping')
                     has_clipping = True
             except Exception as e:
                 messages.append(f"⚠️ Error checking clipping for '{file_data['display_name']}': {e}")
-                add_issue(file_data, 'audio_error_clipping')
     if not has_clipping and checked_files > 0:
         messages.append("✅ No clipping detected")
     return updated_file_data, messages
@@ -394,7 +424,7 @@ def validate_silence(file_display_data: dict) -> tuple[dict, list[str]]:
                 audio = AudioSegment.from_file(str(f_path))
                 # Check dBFS. Extremely low values indicate silence.
                 if audio.dBFS < SILENCE_THRESHOLD_DBFS:
-                    messages.append(f"❌ Silent track detected: '{file_data['display_name']}' ({audio.dBFS:.2f} dBFS)")
+                    messages.append(f"👂 Silent track detected: '{file_data['display_name']}' ({audio.dBFS:.2f} dBFS)")
                     add_issue(file_data, 'audio_silence')
                     has_silence = True
             except Exception as e:
@@ -445,7 +475,7 @@ def validate_zero_crossings(file_display_data: dict) -> tuple[dict, list[str]]:
                     issue_desc = []
                     if not start_ok: issue_desc.append("start")
                     if not end_ok: issue_desc.append("end")
-                    messages.append(f"❌ Zero Crossing: '{file_data['display_name']}' does not {' and '.join(issue_desc)} on zero crossing.")
+                    messages.append(f"🔈 Zero Crossing: '{file_data['display_name']}' does not {' and '.join(issue_desc)} on zero crossing.")
                     add_issue(file_data, 'audio_zero_crossing')
                     has_crossing_issue = True
 
@@ -494,7 +524,7 @@ def validate_sample_lengths(file_display_data: dict) -> tuple[dict, list[str]]:
 
                 # Check if deviation is within tolerance (relative to one bar)
                 if deviation > BAR_LENGTH_TOLERANCE:
-                    messages.append(f"❌ Bar Length: '{filename}' is not a whole number of bars ({num_bars:.3f} bars at {bpm} BPM)")
+                    messages.append(f"📏 Bar Length: '{filename}' is not a whole number of bars ({num_bars:.3f} bars at {bpm} BPM)")
                     add_issue(file_data, 'audio_bar_length')
                     has_length_issue = True
 
@@ -617,7 +647,7 @@ def validate_sample_order(file_display_data: dict) -> tuple[dict, list[str]]:
         if sequences:
             unique_sequences = set(sequences)
             if len(sequences) != len(unique_sequences):
-                messages.append(f"❌ Sequence Duplicates: Group '{group_name_display}' ({attribute_type_display})")
+                messages.append(f"🔢 Sequence Duplicates: Group '{group_name_display}' ({attribute_type_display})")
                 has_order_issue = True
                 for fd in group_file_list: add_issue(fd, 'sample_order_duplicate_seq')
             else:
@@ -625,7 +655,7 @@ def validate_sample_order(file_display_data: dict) -> tuple[dict, list[str]]:
                 # Check for gaps only if sequence starts from 1 or 0 (common patterns)
                 if (min_seq == 1 and set(range(1, max_seq + 1)) != unique_sequences) or \
                    (min_seq == 0 and set(range(0, max_seq + 1)) != unique_sequences):
-                    messages.append(f"❌ Sequence Gaps: Group '{group_name_display}' ({attribute_type_display})")
+                    messages.append(f"🔢 Sequence Gaps: Group '{group_name_display}' ({attribute_type_display})")
                     has_order_issue = True
                     for fd in group_file_list: add_issue(fd, 'sample_order_gap_seq')
 
@@ -667,12 +697,7 @@ def validate_sample_order(file_display_data: dict) -> tuple[dict, list[str]]:
         expected_paths = [fd['path'] for fd in expected_sorted_list]
 
         if current_paths != expected_paths:
-            messages.append(f"❌ Sample Order Issue: Group '{group_name_display}' ({attribute_type_display})")
-            # Provide more detailed feedback
-            current_names = [p.name for p in current_paths]
-            expected_names = [p.name for p in expected_paths]
-            messages.append(f"    Current Order : {current_names}")
-            messages.append(f"    Expected Order: {expected_names} (Sort: BPM -> Alpha Key -> Seq)")
+            messages.append(f"🔢 Sample Order Issue: Group '{group_name_display}' ({attribute_type_display})")
             has_order_issue = True
             for fd in group_file_list: add_issue(fd, 'sample_order_incorrect')
 
@@ -745,7 +770,7 @@ def validate_spelling(file_display_data: dict) -> tuple[dict, list[str]]:
             if misspelled:
                 # Report only the first misspelled word found for brevity
                 first_misspelled = list(misspelled)[0]
-                messages.append(f"❌ Spelling? '{filename}' (potential issue: '{first_misspelled}')")
+                messages.append(f"🔡 Spelling? '{filename}' (potential issue: '{first_misspelled}')")
                 add_issue(file_data, 'spelling')
                 # Store the potentially misspelled word for UI if needed
                 file_data['spelling_details'] = first_misspelled
@@ -1031,7 +1056,10 @@ with col1:
                          if issues:
                             # --- Determine Icon and Color based on Issues --- #
                             has_error = any(i.startswith('audio_error') or i.startswith('artwork_error') for i in issues)
-                            has_spec_issue = any(i in ['audio_format', 'audio_samplerate', 'audio_bitdepth', 'audio_channels', 'audio_clipping', 'audio_silence', 'audio_zero_crossing', 'audio_bar_length'] for i in issues)
+                            has_clipping_issue = 'audio_clipping' in issues # Added check
+                            has_zero_crossing_issue = 'audio_zero_crossing' in issues
+                            spec_issue_types = ['audio_format', 'audio_samplerate', 'audio_bitdepth', 'audio_channels', 'audio_silence', 'audio_bar_length'] # Excludes zero crossing and clipping
+                            has_spec_issue = any(i in spec_issue_types for i in issues)
                             has_art_issue = any(i in ['artwork_format', 'artwork_size', 'artwork_dims', 'artwork_square'] for i in issues)
                             has_order_issue = any(i.startswith('sample_order') for i in issues)
                             has_naming_issue = any(i in ['artwork_naming', 'demo_naming', 'demo_multiple', 'demo_missing_suffix'] for i in issues)
@@ -1039,28 +1067,62 @@ with col1:
                             has_spacing_issue = 'spacing' in issues
                             has_potential_demo = 'potential_demo_extra' in issues
 
-                            # Set color/prefix based on severity
-                            if has_error: color, prefix = "red", "💥"
-                            elif has_spec_issue or has_art_issue: color, prefix = "red", "❌"
-                            elif has_order_issue: color, prefix = "purple", "🔢"
-                            elif has_naming_issue: color, prefix = "orange", "❓"
-                            elif has_spelling_issue: color, prefix = "#FFC300", "🔡"
-                            elif has_spacing_issue or has_potential_demo: color, prefix = "yellow", "⚠️"
-                            # -- New logic: Check for OK status if no specific error was found yet -- #
-                            elif 'artwork_ok' in issues:
-                                color = "green" # Keep color green
-                                # prefix is already '🖼️' from the type check above
-                            elif 'demo_ok' in issues:
-                                color = "green" # Keep color green
-                                # prefix is already '🎵' from the type check above
-                            # -- End of new logic -- #
-                            else: # Fallback for any other unhandled issue in the list
-                                color, prefix = "grey", "❔"
-                         # If the 'issues' list was empty, color remains 'green' and prefix is the type icon
+                            # --- Collect all relevant icons --- #
+                            icons_list = []
+                            if has_error: icons_list.append("💥")
+                            if has_clipping_issue: icons_list.append("📎") # Added clipping icon
+                            if has_spec_issue or has_art_issue: icons_list.append("❌")
+                            if has_zero_crossing_issue: icons_list.append("🔈") # Changed back to speaker as requested
+                            if has_order_issue: icons_list.append("🔢")
+                            if has_naming_issue: icons_list.append("❓")
+                            if has_spelling_issue: icons_list.append("🔡")
+                            if has_spacing_issue or has_potential_demo: # Combine spacing/potential demo visually
+                                if "⚠️" not in icons_list: icons_list.append("⚠️")
+                            if 'audio_silence' in issues: icons_list.append("👂") # Added silent icon
+
+                            # --- Determine final color based on highest priority issue found --- #
+                            final_color = "green" # Default
+                            if has_error:
+                                final_color = "red"
+                            elif has_clipping_issue: # High priority error
+                                final_color = "red"
+                            elif has_spec_issue or has_art_issue:
+                                final_color = "red"
+                            elif has_zero_crossing_issue:
+                                final_color = "#FFA500" # Orange
+                            elif has_order_issue:
+                                final_color = "purple"
+                            elif has_naming_issue:
+                                final_color = "orange"
+                            elif has_spelling_issue:
+                                final_color = "#FFC300" # Yellow/Orange
+                            elif has_spacing_issue or has_potential_demo:
+                                final_color = "yellow"
+                            elif 'audio_silence' in issues:
+                                final_color = "grey"
+                            elif 'artwork_ok' in issues or 'demo_ok' in issues:
+                                 final_color = "green"
+                            elif issues: # Catch any other unforeseen issue
+                                final_color = "grey"
+                                if not icons_list: icons_list.append("❔") # Add generic if no specific icon applies
+
+                            # --- Construct the prefix string --- #
+                            final_prefix = "".join(icons_list)
+
+                            # Handle cases with no specific issue icons (use default type icon)
+                            if not final_prefix:
+                                if is_artwork: final_prefix = "🖼️"
+                                elif is_audio: final_prefix = "🎵"
+                                else: final_prefix = "📄" # Should not happen if 'issues' has content, but safe fallback
+                                final_color = "green" # Ensure color is green if only OK issues or none
+
+                         else: # No issues found at all
+                             final_prefix = prefix # Use the default type icon (🖼️, 🎵, 📄)
+                             final_color = "green"
 
                          # Ensure display_name exists and is a string
                          display_text = str(file_data.get('display_name', 'Unknown File'))
-                         st.markdown(f"&nbsp;&nbsp;&nbsp;&nbsp;<span style='color:{color};'>{prefix} {display_text}</span>", unsafe_allow_html=True)
+                         st.markdown(f"&nbsp;&nbsp;&nbsp;&nbsp;<span style='color:{final_color};'>{final_prefix} {display_text}</span>", unsafe_allow_html=True)
                 st.markdown("---")
     # Initial placeholder for file list area - Updated condition
     elif not st.session_state.folder_path:
@@ -1091,11 +1153,15 @@ with col1:
     with btn_col3:
         # ... (Reset button)
         if st.button("✨ RESET"):
-            st.session_state.uploaded_files_state = [] # Clear stored files
+            # Clear results and internal state
+            st.session_state.uploaded_files_state = [] # Clear stored files (legacy, might remove later)
             st.session_state.messages = []
             st.session_state.file_display_data = {}
             st.session_state.processing_complete = False
             st.session_state.loudness_results = []
+            # --- Add this line to clear the text input --- #
+            st.session_state.folder_path = ""
+            # --- End of added line ---
             # Need to clear the file uploader explicitly if possible, or rely on rerun
             # Setting key might trigger rerun and clearing
             st.rerun()
