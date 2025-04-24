@@ -159,7 +159,7 @@ def validate_folder_names(file_display_data: dict) -> list[str]:
         messages.append(f"❔ Unexpected subfolders found: {invalid_found}. Only '{ '/'.join(VALID_SUBFOLDERS) }' allowed if subfolders exist.")
     else:
         # Success message if no invalid folders found (even if no subfolders exist)
-        messages.append(f"✅ Subfolder names are valid (if any subfolders exist). Allowed: '{ '/'.join(VALID_SUBFOLDERS) }'")
+        messages.append(f"✅ Subfolder names are valid")
 
     return messages
 
