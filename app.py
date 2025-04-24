@@ -128,23 +128,44 @@ def get_sorted_messages(messages: list[str]) -> list[str]:
 
 # --- QC Check Functions ---
 
-def validate_folder_names(subfolder_paths: list[Path]) -> list[str]:
-    """Checks if subfolder names are valid."""
+def validate_folder_names(subfolder_paths_keys: list[Path]) -> list[str]:
+    """Checks if only valid top-level folders ('Loops', 'One Shots') are present."""
     messages = []
-    invalid_subfolders = []
-    # Only check folders that were directly dropped or are direct children of dropped folders
-    # This logic might need refinement based on how users drop things.
-    # For now, we check the keys of file_display_data, assuming they represent the intended subfolders.
-    for sf_path in subfolder_paths:
-        if sf_path.is_dir() and sf_path.name not in VALID_SUBFOLDERS:
-            invalid_subfolders.append(sf_path.name)
+    invalid_folders = []
+    valid_found = False
 
-    if not invalid_subfolders:
-        messages.append("✅ Folder names")
+    # Allow a potential root folder placeholder if needed, add to valid set temporarily
+    allowed_folders = VALID_SUBFOLDERS.union({Path("_root_files_")}) # Add _root_files_ temporarily
+
+    for sf_path in subfolder_paths_keys:
+        folder_name = sf_path.name # Get the string name from Path object
+        if folder_name in VALID_SUBFOLDERS:
+            valid_found = True
+        elif folder_name == "_root_files_":
+             messages.append(f"❔ Files found directly in root (not in 'Loops' or 'One Shots').")
+             # Decide if root files are an error or just a warning
+             # add_issue(..., 'folder_root_files') # Optional: Add specific issue marker
+        elif folder_name == "_error_parsing_name_":
+             messages.append(f"❌ Error determining folder structure for some files.")
+             invalid_folders.append(folder_name) # Treat as invalid
+        else:
+            # Folder is not Loops, One Shots, or _root_files_
+            invalid_folders.append(folder_name)
+
+    if not invalid_folders and valid_found:
+        messages.append("✅ Folder structure OK (Loops/One Shots)")
+    elif not invalid_folders and not valid_found:
+         # Only root files or parsing errors found
+         pass # Specific messages already added
     else:
-        messages.append(f"❌ Invalid subfolder names found (must be {', '.join(VALID_SUBFOLDERS)})")
-        for name in invalid_subfolders:
-            messages.append(f"    - Invalid: '{name}'")
+        messages.append(f"❌ Invalid top-level folders found: {invalid_folders}. Only 'Loops' and 'One Shots' allowed.")
+
+    # Check if BOTH Loops and One Shots are present (optional stricter check)
+    # found_loops = any(p.name == "Loops" for p in subfolder_paths_keys)
+    # found_one_shots = any(p.name == "One Shots" for p in subfolder_paths_keys)
+    # if valid_found and not (found_loops and found_one_shots):
+    #      messages.append(f"❔ Missing one of 'Loops' or 'One Shots' folders.")
+
     return messages
 
 def validate_filename_spaces(file_display_data: dict) -> tuple[dict, list[str]]:
@@ -908,73 +929,71 @@ def process_dropped_files(uploaded_files):
     with st.spinner('Processing uploaded files...'):
         if uploaded_files:
             try:
-                # Create a temporary directory to store uploaded files
                 temp_dir = tempfile.mkdtemp()
                 temp_dir_path = Path(temp_dir)
-                saved_file_paths = []
+                parent_folders = defaultdict(list) # Use defaultdict
 
-                # Save uploaded files to the temporary directory
+                # Save files and determine intended parent folder
                 for uploaded_file in uploaded_files:
-                    file_path = temp_dir_path / uploaded_file.name
-                    with open(file_path, "wb") as f:
+                    # Use original name for path determination and display
+                    original_name = uploaded_file.name
+                    file_path_in_temp = temp_dir_path / original_name # Keep structure in temp if name has it
+
+                    # Ensure subdirs exist in temp dir if original name has them
+                    file_path_in_temp.parent.mkdir(parents=True, exist_ok=True)
+
+                    with open(file_path_in_temp, "wb") as f:
                         f.write(uploaded_file.getbuffer())
-                    saved_file_paths.append(file_path)
 
-                # Now process the saved files using their paths
-                parent_folders = {}
-                for item_path in saved_file_paths:
-                    # In this context, each saved file is treated as a top-level item
-                    # We need to handle potential dropped folders differently if st.file_uploader could accept them
-                    # However, st.file_uploader typically uploads individual files.
-                    # If users select multiple files from one folder, they appear individually.
-                    # We will group by the parent of the *saved* temp file for structure.
-                    # This might differ from original structure if multiple folders selected.
-                    # A more robust solution might require analyzing original paths if available, or asking user for structure.
-                    # --- Simplified Grouping for now --- #
-                    # Group by immediate parent (which is the temp dir) - less useful
-                    # Let's try grouping by original filename parts if possible, assuming a structure like 'Folder/File.wav'
-                    # This is heuristic!
+                    # Determine grouping key based on the *first* directory component
                     try:
-                         # Attempt to reconstruct a semblence of original structure if path has slashes
-                         original_parts = Path(uploaded_file.name).parts
-                         if len(original_parts) > 1:
-                             # Assume the part before the last is the folder name
-                             grouping_key_name = original_parts[-2]
-                         else:
-                             grouping_key_name = "_root_files_"
+                        # Use pathlib to handle paths robustly
+                        original_path_obj = Path(original_name)
+                        # Check if there are parent directories in the name
+                        if len(original_path_obj.parts) > 1:
+                             # The first part is the top-level folder (e.g., 'Loops')
+                            grouping_key_name = original_path_obj.parts[0]
+                        else:
+                             # File likely at the root level of the drop
+                            grouping_key_name = "_root_files_"
                     except Exception:
-                         grouping_key_name = "_root_files_"
+                         grouping_key_name = "_error_parsing_name_"
 
-                    grouping_key_path = Path(grouping_key_name) # Use Path for sorting key consistency
+                    grouping_key_path = Path(grouping_key_name)
+                    # Store temp path but use original name later
+                    parent_folders[grouping_key_path].append({
+                        "temp_path": file_path_in_temp,
+                        "original_name": original_name
+                    })
 
-                    # We need *all* files, not just the top-level ones for QC
-                    # get_files_from_item is less relevant here as we have individual files
-                    # Let's assume item_path IS the file to check
-                    f_path = item_path # The actual file path in temp dir
-
-                    if grouping_key_path not in parent_folders:
-                        parent_folders[grouping_key_path] = []
-                    # Store the temporary path for processing
-                    parent_folders[grouping_key_path].append(f_path)
-
-                # Sort parent folders (heuristic names) and files within them naturally
+                # Sort parent folders and files within them naturally
                 sorted_parents = sorted(parent_folders.keys(), key=natural_sort_key)
 
                 processed_data = {}
+                all_files_temp_paths = [] # Store temp paths for QC checks
                 for parent_key in sorted_parents:
-                    sorted_files = sorted(parent_folders[parent_key], key=natural_sort_key)
+                    # Sort files based on the *original* name within the group
+                    sorted_files_info = sorted(parent_folders[parent_key], key=lambda x: natural_sort_key(Path(x['original_name'])))
+
                     processed_data[parent_key] = [
-                        {"path": f, "display_name": f.name, "issues": []} # Use temp path, but original name
-                        for f in sorted_files
+                        {
+                            "path": file_info['temp_path'], # Use temp path for checks
+                            "display_name": file_info['original_name'], # Use original name for display/parsing
+                            "issues": []
+                        }
+                        for file_info in sorted_files_info
                     ]
-                    all_files_flat.extend(sorted_files)
+                    all_files_temp_paths.extend([f_info['temp_path'] for f_info in sorted_files_info])
 
                 st.session_state.file_display_data = processed_data
-                st.session_state.all_files_flat_paths = all_files_flat
+                # We need the flat list of *temporary* paths for some checks if they rely on path object
+                # But many checks use display_name now. Let's store original names flat list for now.
+                st.session_state.all_files_flat_original_names = [f_info['original_name'] for parent in processed_data.keys() for f_info in processed_data[parent]]
 
-                # Run QC Checks on the files in the temporary directory
+                # --- Run QC Checks --- #
                 if st.session_state.file_display_data:
                     with st.spinner('Running QC Checks...'):
+                        # Pass the structured data using temporary paths but original names
                         updated_data, qc_messages, loudness_data = run_all_qc_checks(st.session_state.file_display_data)
                         st.session_state.file_display_data = updated_data
                         st.session_state.messages = qc_messages
@@ -986,15 +1005,13 @@ def process_dropped_files(uploaded_files):
                  st.error(f"Error during file processing: {e}")
                  st.session_state.messages = [f"❌ Error processing files: {e}"]
             finally:
-                # Clean up the temporary directory
                 if temp_dir:
                     try:
                         shutil.rmtree(temp_dir)
                         print(f"Removed temp directory: {temp_dir}")
                     except Exception as e:
                          print(f"Error removing temp directory {temp_dir}: {e}")
-
-        else: # No files uploaded
+        else:
             st.session_state.messages = ["No files uploaded."]
 
     st.session_state.processing_complete = True
@@ -1110,7 +1127,7 @@ with col1:
             st.session_state.processing_complete = False
             st.session_state.reset_app = True # This might not be needed now
             st.session_state.loudness_results = []
-            if 'all_files_flat_paths' in st.session_state: del st.session_state.all_files_flat_paths
+            if 'all_files_flat_original_names' in st.session_state: del st.session_state.all_files_flat_original_names
             # Clear the file uploader widget state requires a more complex approach or relying on rerun
             # st.session_state.file_uploader = [] # This might work depending on Streamlit version
             st.rerun()
