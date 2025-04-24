@@ -481,7 +481,7 @@ def validate_zero_crossings(file_display_data: dict) -> tuple[dict, list[str]]:
                     issue_desc = []
                     if not start_ok: issue_desc.append("start")
                     if not end_ok: issue_desc.append("end")
-                    messages.append(f"🔈 Zero Crossing: '{file_data['display_name']}' does not {' and '.join(issue_desc)} on zero crossing.")
+                    messages.append(f"🔈 Zero Crossing: '{file_data['display_name']}' does not {' and '.join(issue_desc)} on zero crossing")
                     add_issue(file_data, 'audio_zero_crossing')
                     has_crossing_issue = True
 
