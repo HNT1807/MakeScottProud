@@ -46,6 +46,24 @@ KEY_ORDER = {
     "A": 9, "Am": 9.1, "A#": 10, "Bb": 10, "A#m": 10.1, "Bbm": 10.1,
     "B": 11, "Bm": 11.1
 }
+
+# New Key Order for A-based musical sorting (A=0, A#=1, ..., G#=11)
+# Minor keys add 0.1, consistent with original KEY_ORDER
+KEY_ORDER_MUSICAL_A = {
+    "A": 0, "Am": 0.1,
+    "A#": 1, "A#m": 1.1, "Bb": 1, "Bbm": 1.1,
+    "B": 2, "Bm": 2.1,
+    "C": 3, "Cm": 3.1,
+    "C#": 4, "C#m": 4.1, "Db": 4, "Dbm": 4.1,
+    "D": 5, "Dm": 5.1,
+    "D#": 6, "D#m": 6.1, "Eb": 6, "Ebm": 6.1,
+    "E": 7, "Em": 7.1,
+    "F": 8, "Fm": 8.1,
+    "F#": 9, "F#m": 9.1, "Gb": 9, "Gbm": 9.1,
+    "G": 10, "Gm": 10.1,
+    "G#": 11, "G#m": 11.1, "Ab": 11, "Abm": 11.1,
+}
+
 SPELLCHECK_IGNORE_WORDS = {"Metastarter", "Cymatics", "Ableton", "Synth", "Serum", "Vital", "Phaseplant"}
 SPELLCHECK_REMOVE_PATTERNS = re.compile(r"_key[A-Ga-g][#b♭]?[mM]?|_\d+bpm|_\d+_|_\d+$|_+Demo$|_Artwork$", re.IGNORECASE)
 SPELLCHECK_SPLIT_WORDS_PATTERN = re.compile(r"[A-Z]?[a-z]+|[A-Z]+(?=[A-Z][a-z]|$)|\d+")
@@ -670,16 +688,17 @@ def validate_sample_order(file_display_data: dict) -> tuple[dict, list[str]]:
             parsed = file_data['parsed_info']
             bpm = parsed['bpm'] or float('inf') # Sort files without BPM last
             # Use the key name string directly for alphabetical sorting, handle None
-            key_str = parsed['key'] if parsed['key'] else "~" # Puts None last alphabetically
-            # key_val = KEY_ORDER.get(parsed['key'], float('inf')) if parsed['key'] else float('inf') # Old numeric key order
+            # key_str = parsed['key'] if parsed['key'] else "~" # Puts None last alphabetically # OLD alphabetical sort
+            # Use the new musical key order dictionary, default to infinity if key is None or not found
+            key_val_musical = KEY_ORDER_MUSICAL_A.get(parsed['key'], float('inf')) if parsed['key'] else float('inf')
             seq = parsed['sequence'] or float('inf') # Sort files without sequence last
 
             if parsed['attribute_type'] == "key_and_bpm":
-                # Sort by BPM, then Key Name (alphabetical), then Sequence
-                return (bpm, key_str, seq)
+                # Sort by BPM, then Key (Musical A-based), then Sequence
+                return (bpm, key_val_musical, seq)
             elif parsed['attribute_type'] == "key_only":
-                # Sort by Key Name (alphabetical), then Sequence
-                return (key_str, seq)
+                # Sort by Key (Musical A-based), then Sequence
+                return (key_val_musical, seq)
             elif parsed['attribute_type'] == "bpm_only":
                 # Sort by BPM, then Sequence
                 return (bpm, seq)
